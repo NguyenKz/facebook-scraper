@@ -35,7 +35,7 @@ class FacebookScraper:
     default_headers = {
         'Accept-Language': 'en-US,en;q=0.5',
         "Sec-Fetch-User": "?1",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/603.3.8 (KHTML, like Gecko) Version/10.1.2 Safari/603.3.8",
+        "User-Agent": "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Mobile Safari/537.36",
     }
     have_checked_locale = False
 
@@ -48,7 +48,6 @@ class FacebookScraper:
             requests_kwargs = {}
 
         self.session = session
-        requests_kwargs["params"] = {"locale": "en_US"}
         self.requests_kwargs = requests_kwargs
 
     def set_user_agent(self, user_agent):
@@ -177,69 +176,13 @@ class FacebookScraper:
                 friends_found += 1
             if limit and friends_found > limit:
                 return
-            more = re.search(r'm_more_friends",href:"([^"]+)"', response.text)
+            more = re.search(r'href:"(/[^/]+/friends[^"]+)"', response.text)
             if more:
                 friend_url = utils.urljoin(FB_MOBILE_BASE_URL, more.group(1))
                 if request_url_callback:
                     request_url_callback(friend_url)
             else:
                 return
-
-    def get_collection(self, more_url, limit=None, **kwargs) -> Iterator[Profile]:
-        request_url_callback = kwargs.get('request_url_callback')
-        count = 0
-        while more_url:
-            logger.debug(f"Requesting page from: {more_url}")
-            response = self.get(more_url)
-            if response.text.startswith("for (;;);"):
-                prefix_length = len('for (;;);')
-                data = json.loads(response.text[prefix_length:])  # Strip 'for (;;);'
-                for action in data['payload']['actions']:
-                    if action['cmd'] == 'append' and action['html']:
-                        element = utils.make_html_element(
-                            action['html'],
-                            url=FB_MOBILE_BASE_URL,
-                        )
-                        elems = element.find('a.touchable')
-                        html = element.text
-                    elif action['cmd'] == 'script':
-                        more_url = re.search(
-                            r'("\\/timeline\\/app_collection\\/more\\/[^"]+")', action["code"]
-                        )
-                        if more_url:
-                            more_url = more_url.group(1)
-                            more_url = json.loads(more_url)
-            else:
-                elems = response.html.find('#timelineBody a.touchable')
-                more_url = re.search(
-                    r'href:"(/timeline/app_collection/more/[^"]+)"', response.text
-                )
-                if more_url:
-                    more_url = more_url.group(1)
-            logger.debug(f"Found {len(elems)} elems")
-            for elem in elems:
-                name = elem.find("strong", first=True).text
-                link = elem.attrs.get("href")
-                try:
-                    tagline = elem.find("div.twoLines", first=True).text
-                except:
-                    tagline = None
-                profile_picture = elem.find("i.profpic", first=True).attrs.get("style")
-                match = re.search(r"url\('(.+)'\)", profile_picture)
-                if match:
-                    profile_picture = utils.decode_css_url(match.groups()[0])
-                result = {
-                    "link": link,
-                    "name": name,
-                    "profile_picture": profile_picture,
-                    "tagline": tagline,
-                }
-                yield result
-                count += 1
-            if type(limit) in [int, float] and count > limit:
-                return
-            if more_url and request_url_callback:
-                request_url_callback(more_url)
 
     def get_profile(self, account, **kwargs) -> Profile:
         account = account.replace("profile.php?id=", "")
@@ -248,36 +191,6 @@ class FacebookScraper:
         if kwargs.get("allow_extra_requests", True):
             logger.debug(f"Requesting page from: {account}")
             response = self.get(account)
-
-            try:
-                result["Friend_count"] = utils.parse_int(
-                    response.html.find("a[data-store*='friends']>div>div")[-1].text.split()[0]
-                )
-            except Exception as e:
-                result["Friend_count"] = None
-                logger.error(f"Friend_count extraction failed: {e}")
-            try:
-                result["Follower_count"] = utils.parse_int(
-                    response.html.find(
-                        "div[data-sigil*='profile-intro-card-log']",
-                        containing="Followed by",
-                        first=True,
-                    ).text
-                )
-            except Exception as e:
-                result["Follower_count"] = None
-                logger.error(f"Follower_count extraction failed: {e}")
-            try:
-                following_url = f'/{account}?v=following'
-                logger.debug(f"Fetching {following_url}")
-                following_response = self.get(following_url)
-                result["Following_count"] = utils.parse_int(
-                    following_response.html.find("div[role='heading']", first=True).text
-                )
-            except Exception as e:
-                result["Following_count"] = None
-                logger.error(f"Following_count extraction failed: {e}")
-
             photo_links = response.html.find("a[href^='/photo.php']")
             if len(photo_links) == 1:
                 profile_photo = photo_links[0]
@@ -376,7 +289,7 @@ class FacebookScraper:
                 elif len(bits) == 1:
                     result[header] = bits[0]
                 elif (
-                    header in ["Contact Info", "Basic Info", "Education", "Family Members", "Other names"] and len(bits) % 2 == 0
+                    header in ["Contact Info", "Basic info", "Other names"] and len(bits) % 2 == 0
                 ):  # Divisible by two, assume pairs
                     pairs = {}
                     for i in range(0, len(bits), 2):
@@ -391,23 +304,34 @@ class FacebookScraper:
                     result[header] = "\n".join(bits)
         if kwargs.get("friends"):
             result["Friends"] = list(self.get_friends(account, **kwargs))
-        if kwargs.get("followers"):
-            result["Followers"] = list(
-                self.get_collection(
-                    f'/{account}?v=followers', limit=kwargs.get("followers"), **kwargs
-                )
-            )
-        if kwargs.get("following"):
-            result["Following"] = list(
-                self.get_collection(
-                    f'/{account}?v=following', limit=kwargs.get("following"), **kwargs
-                )
-            )
         return result
 
     def get_page_info(self, page, **kwargs) -> Profile:
         result = {}
         desc = None
+
+        if kwargs.get("allow_extra_requests", True):
+            for post in self.get_posts(page, **kwargs):
+                logger.debug(f"Fetching {post['post_id']}")
+                resp = self.get(post["post_id"])
+                elem = resp.html.find("script[type='application/ld+json']", first=True)
+                if not elem:
+                    continue
+                meta = json.loads(elem.text)
+                if meta.get("creator"):
+                    result = meta["creator"]
+                    result["type"] = result.pop("@type")
+                    desc = resp.html.find("meta[name='description']", first=True)
+                    try:
+                        for interaction in result.get("interactionStatistic", []):
+                            if interaction["interactionType"] == {
+                                "@type": "http://schema.org/FollowAction"
+                            }:
+                                result["followers"] = interaction["userInteractionCount"]
+                    except TypeError as e:
+                        logger.error(e)
+                    result.pop("interactionStatistic", None)
+                    break
 
         try:
             about_url = f'/{page}/about/'
@@ -425,41 +349,30 @@ class FacebookScraper:
                 result["profile_photo"] = profile_photo.attrs["src"]
         except Exception as e:
             logger.error(e)
-        try:
-            url = f'/{page}/'
-            logger.debug(f"Requesting page from: {url}")
-            resp = self.get(url)
-            desc = resp.html.find("meta[name='description']", first=True)
-            elem = resp.html.find("script[type='application/ld+json']", first=True)
-            meta = json.loads(elem.text)
-            result.update(meta["author"])
-            result["type"] = result.pop("@type")
-            for interaction in meta.get("interactionStatistic", []):
-                if interaction["interactionType"] == "http://schema.org/FollowAction":
-                    result["followers"] = interaction["userInteractionCount"]
             try:
-                result["about"] = resp.html.find(
-                    '#pages_msite_body_contents>div>div:nth-child(2)', first=True
-                ).text
+                url = f'/{page}/'
+                logger.debug(f"Requesting page from: {url}")
+                resp = self.get(url)
+                desc = resp.html.find("meta[name='description']", first=True)
+                try:
+                    result["about"] = resp.html.find(
+                        '#pages_msite_body_contents>div>div:nth-child(2)', first=True
+                    ).text
+                except Exception as e:
+                    logger.error(e)
+                    result = self.get_profile(page)
+                    result["followers"] = utils.convert_numeric_abbr(
+                        resp.html.find("span.unlinkedTextEntity", first=True).text.replace(
+                            " Followers", ""
+                        )
+                    )
             except Exception as e:
                 logger.error(e)
-                result = self.get_profile(page)
-                result["followers"] = utils.convert_numeric_abbr(
-                    resp.html.find("span.unlinkedTextEntity", first=True).text.replace(
-                        " Followers", ""
-                    )
-                )
-        except Exception as e:
-            logger.error(e)
         if desc:
             logger.debug(desc.attrs["content"])
-            match = re.search(r'\..+?(\d[\d,.]+).+·', desc.attrs["content"])
+            match = re.search(r'\..+?(\d[\d,.]+)', desc.attrs["content"])
             if match:
                 result["likes"] = utils.parse_int(match.groups()[0])
-            bits = desc.attrs["content"].split("·")
-            if len(bits) == 3:
-                result["people_talking_about_this"] = utils.parse_int(bits[1])
-                result["checkins"] = utils.parse_int(bits[2])
 
         return result
 
@@ -625,7 +538,7 @@ class FacebookScraper:
         elems = response.html.find("input[name][value]")
         data = {elem.attrs['name']: elem.attrs['value'] for elem in elems}
         data.update(extra_data)
-        response = self.session.post(url, data=data, **self.requests_kwargs)
+        response = self.session.post(url, data=data)
         return response
 
     def login(self, email: str, password: str):
